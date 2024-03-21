@@ -12,7 +12,7 @@ use nix::{
 };
 
 use signal_hook::consts::*;
-use sysinfo::{ProcessExt, ProcessRefreshKind, System, SystemExt};
+use sysinfo::{ ProcessRefreshKind, System };
 use zellij_utils::{
     async_std, channels,
     channels::TrySendError,
@@ -35,6 +35,7 @@ use std::{
     env,
     fs::File,
     io::Write,
+    os::fd::AsRawFd,
     os::unix::{io::RawFd, process::CommandExt},
     path::PathBuf,
     process::{Child, Command},
@@ -185,7 +186,7 @@ fn handle_openpty(
                 .args(&cmd.args)
                 .env("ZELLIJ_PANE_ID", &format!("{}", terminal_id))
                 .pre_exec(move || -> std::io::Result<()> {
-                    if libc::login_tty(pid_secondary) != 0 {
+                    if libc::login_tty(pid_secondary.as_raw_fd()) != 0 {
                         panic!("failed to set controlling terminal");
                     }
                     close_fds::close_open_fds(3, &[]);
@@ -201,11 +202,11 @@ fn handle_openpty(
             let exit_status = handle_command_exit(child)
                 .with_context(|| err_context(&cmd))
                 .fatal();
-            let _ = nix::unistd::close(pid_secondary);
+            let _ = nix::unistd::close(pid_secondary.as_raw_fd());
             quit_cb(PaneId::Terminal(terminal_id), exit_status, cmd);
         });
 
-        Ok((pid_primary, child_id as RawFd))
+        Ok((pid_primary.as_raw_fd(), child_id as RawFd))
     } else {
         Err(ZellijError::CommandNotFound {
             terminal_id,
@@ -743,10 +744,10 @@ impl ServerOsApi for ServerOsInputOutput {
         system_info.refresh_processes_specifics(ProcessRefreshKind::default());
 
         if let Some(process) = system_info.process(pid.into()) {
-            let cwd = process.cwd();
+            let cwd = process.cwd()?;
             let cwd_is_empty = cwd.iter().next().is_none();
             if !cwd_is_empty {
-                return Some(process.cwd().to_path_buf());
+                return Some(cwd.to_path_buf());
             }
         }
         None
@@ -763,10 +764,13 @@ impl ServerOsApi for ServerOsInputOutput {
                 system_info.refresh_process_specifics(pid.into(), ProcessRefreshKind::default());
             if is_found {
                 if let Some(process) = system_info.process(pid.into()) {
-                    let cwd = process.cwd();
+                    let Some(cwd) = process.cwd() else {
+                        continue;
+                    };
+                    
                     let cwd_is_empty = cwd.iter().next().is_none();
                     if !cwd_is_empty {
-                        cwds.insert(pid, process.cwd().to_path_buf());
+                        cwds.insert(pid, cwd.to_path_buf());
                     }
                 }
             }
